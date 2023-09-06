@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from datasets import Dataset
 import torch.nn.functional as F
 import bitsandbytes as bnb
-import torch
+import torch.nn as nn
 from peft import (
     LoraConfig,
     get_peft_model,
