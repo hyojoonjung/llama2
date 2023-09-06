@@ -24,7 +24,7 @@ from peft import (
 from sklearn.metrics import average_precision_score
 
 from transformers import Trainer, DataCollatorWithPadding, PretrainedConfig, \
-                        DebertaForTokenClassification, DebertaTokenizer, DebertaForCausalLM
+                        DebertaForTokenClassification, DebertaTokenizer
 
 load_dotenv()
 hf_token = os.getenv("HF_TOKEN")
@@ -104,14 +104,6 @@ def train(
     learning_rate: float = 3e-4,
     val_set_size: int = 2000,
     
-    # lora hyperparams
-    lora_r: int = 8,
-    lora_alpha: int = 16,
-    lora_dropout: float = 0.05,
-    lora_target_modules: List[str] = [
-        "q_proj",
-        "v_proj",
-    ]
 ):
 
     device_map = "auto"
@@ -119,30 +111,23 @@ def train(
 
     # Step 1: Load the model and tokenizer
 
-    model = DebertaForCausalLM.from_pretrained(
+    model = DebertaForTokenClassification.from_pretrained(
         base_model,
         torch_dtype=torch.float16,
         # (여기에 DeBERTa에 적합한 다른 옵션을 추가할 수 있습니다)
     )
     model = CustomDebertaForClassification(model)  # 변경된 부분
 
+    # def print_model_children(model, prefix=""):
+    #     for name, module in model.named_children():
+    #         print(f"{prefix}{name}")
+    #         print_model_children(module, prefix + "  ")
+
+    # # Use it like this
+    # print_model_children(model)
+
     tokenizer = DebertaTokenizer.from_pretrained(base_model)  # 변경된 부분
     tokenizer.pad_token_id = 0
-
-    #Add this for training LoRA
-
-    config = LoraConfig(
-          r=lora_r,
-          lora_alpha=lora_alpha,
-          target_modules=lora_target_modules,
-          lora_dropout=lora_dropout,
-          bias="none",
-          task_type="CAUSAL_LM",
-      )
-    model = get_peft_model(model, config)
-
-    model = prepare_model_for_int8_training(model) # Add this for using int8
-
 
     # Step 2: Load the data
 
