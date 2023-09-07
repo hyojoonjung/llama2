@@ -8,14 +8,17 @@ from tqdm import tqdm
 # data = pd.read_csv('data/train.csv')
 data = pd.read_csv('data/test.csv')
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 base_model = "microsoft/deberta-v3-large"
 model = DebertaV2ForMultipleChoice.from_pretrained(base_model)
 tokenizer = DebertaV2Tokenizer.from_pretrained(base_model)
+model.to(device)
 
 # 데이터 전처리
 prompts = data['prompt'].tolist()
 choices = data[['A', 'B', 'C', 'D', 'E']].values.tolist()
-answers = [ord(a) - ord('A') for a in data['answer'].tolist()]
+# answers = [ord(a) - ord('A') for a in data['answer'].tolist()]
 
 # Update the tokenization step
 input_ids_list = []
@@ -65,67 +68,40 @@ for ids, mask in zip(input_ids_list, attention_mask_list):
 input_ids = torch.stack(padded_input_ids_list)
 attention_mask = torch.stack(padded_attention_mask_list)
 
-# DataLoader 생성
-dataset = TensorDataset(input_ids, attention_mask, torch.tensor(answers))
-dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
-
-# 평가 함수 정의
-def evaluate_MAP(model, dataloader):
-    model.eval()
-    all_scores = []
-    all_labels = []
-    with torch.no_grad():
-        for batch in tqdm(dataloader):
-            input_ids, attention_mask, labels = batch
-            outputs = model(input_ids, attention_mask=attention_mask)[0]
-            scores = torch.softmax(outputs, dim=1)
-            all_scores.extend(scores.tolist())
-            all_labels.extend(labels.tolist())
-    
-    # MAP 계산
-    total_precision = 0
-    num_questions = len(all_labels)
-    
-    for i in range(num_questions):
-        scores = np.array(all_scores[i])
-        correct_label = all_labels[i]
-        
-        # 예측 점수에 따라 정렬
-        sorted_indices = np.argsort(scores)[::-1]
-        
-        # Precision@1 계산
-        if sorted_indices[0] == correct_label:
-            total_precision += 1
-            
-    map_score = total_precision / num_questions
-    return map_score
+# DataLoader 생성을 위한 수정
+dataset = TensorDataset(input_ids, attention_mask)  # answers 부분이 제거됨
+dataloader = DataLoader(dataset, batch_size=2, shuffle=False)  # shuffle을 False로 설정
 
 # 예측 결과를 저장할 DataFrame 생성
 submission_data = []
 
-# 평가 함수 정의
-def evaluate_and_predict(model, dataloader):
+# 예측 함수 정의
+def predict(model, dataloader):
     model.eval()
-    all_scores = []
-    all_labels = []
     with torch.no_grad():
         for idx, batch in tqdm(enumerate(dataloader)):
-            input_ids, attention_mask, labels = batch
+            input_ids, attention_mask = batch
+
+            # 텐서를 GPU로 이동
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+
             outputs = model(input_ids, attention_mask=attention_mask)[0]
             scores = torch.softmax(outputs, dim=1)
-            all_scores.extend(scores.tolist())
-            all_labels.extend(labels.tolist())
             
-            # 예측 결과를 저장합니다
+            # GPU에서 CPU로 데이터를 이동하고 NumPy 배열로 변환
+            scores = scores.cpu().numpy()
+
+            # 예측 결과를 저장
             pred_scores = scores[0]
-            sorted_indices = pred_scores.argsort(descending=True)
-            sorted_choices = " ".join([chr(ord('A') + i) for i in sorted_indices.tolist()])
+            sorted_indices = pred_scores.argsort()[::-1]
+            sorted_choices = " ".join([chr(ord('A') + i) for i in sorted_indices])
             submission_data.append([idx, sorted_choices])
+
+
+# 예측 수행
+predict(model, dataloader)
 
 # submission.csv 파일로 저장
 submission_df = pd.DataFrame(submission_data, columns=['id', 'prediction'])
 submission_df.to_csv('submission.csv', index=False)
-
-# # 기본 능력 테스트
-# map_score = evaluate_MAP(model, dataloader)
-# print(f"Mean Average Precision: {map_score}")
