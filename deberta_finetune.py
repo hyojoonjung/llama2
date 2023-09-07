@@ -1,131 +1,117 @@
-from transformers import DebertaV2ForMultipleChoice, DebertaV2Tokenizer
-from torch.utils.data import DataLoader, TensorDataset
-import torch
-import numpy as np
-import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import label_ranking_average_precision_score
 from tqdm import tqdm
-# 데이터 로드
-# data = pd.read_csv('data/train.csv')
-data = pd.read_csv('data/test.csv')
+import torch
+from torch.utils.data import DataLoader, TensorDataset
+import pandas as pd
+from transformers import DebertaV2ForMultipleChoice, DebertaV2Tokenizer
+import numpy as np
+import torch.nn.functional as F
 
-base_model = "microsoft/deberta-v3-large"
-model = DebertaV2ForMultipleChoice.from_pretrained(base_model)
-tokenizer = DebertaV2Tokenizer.from_pretrained(base_model)
+# Data loading
+train_data = pd.read_csv('data/train.csv')
+extra_6000_data = pd.read_csv('data/6000_train_examples.csv')
+extra_data = pd.read_csv('data/extra_train_set.csv')
 
-# 데이터 전처리
-prompts = data['prompt'].tolist()
-choices = data[['A', 'B', 'C', 'D', 'E']].values.tolist()
-answers = [ord(a) - ord('A') for a in data['answer'].tolist()]
+# Combine all the datasets
+all_data = pd.concat([train_data, extra_6000_data, extra_data], ignore_index=True)
 
-# Update the tokenization step
-input_ids_list = []
-attention_mask_list = []
-for i in range(len(prompts)):
-    prompt = prompts[i]
-    choice_list = choices[i]
-    # Creating a list of 5 pairs: each prompt-choice pair as a tuple
+# Data Preprocessing for all_data
+all_prompts = all_data['prompt'].tolist()
+all_choices = all_data[['A', 'B', 'C', 'D', 'E']].values.tolist()
+all_answers = [ord(a) - ord('A') for a in all_data['answer'].tolist()]
+
+all_data['A'].fillna('Unknown', inplace=True)
+all_data['B'].fillna('Unknown', inplace=True)
+all_data['C'].fillna('Unknown', inplace=True)
+all_data['D'].fillna('Unknown', inplace=True)
+all_data['E'].fillna('Unknown', inplace=True)
+
+all_choices = all_data[['A', 'B', 'C', 'D', 'E']].applymap(str).values.tolist()
+
+# Initialize the model and optimizer
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# model_path = '/kaggle/input/devertav3-large/kaggle/input/deberta_v3_large'
+model_path = 'microsoft/deberta-v3-large'
+model = DebertaV2ForMultipleChoice.from_pretrained(model_path, return_dict=True).to(device)
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5)
+tokenizer = DebertaV2Tokenizer.from_pretrained(model_path)
+
+all_input_ids_list = []
+all_attention_mask_list = []
+
+for i in range(len(all_prompts)):
+    prompt = all_prompts[i]
+    choice_list = all_choices[i]
     prompt_choice_pairs = [(prompt, choice) for choice in choice_list]
-    
+    # print(type(prompt), [type(choice) for choice in choice_list])
+
     inputs = tokenizer.batch_encode_plus(
         prompt_choice_pairs,
-        padding=True, 
-        truncation=True, 
+        padding=True,
+        truncation=True,
         return_tensors="pt"
     )
-    
-    input_ids_list.append(inputs["input_ids"])
-    attention_mask_list.append(inputs["attention_mask"])
 
-# Step 1: Determine max length
-max_length = 0
-for ids in input_ids_list:
-    max_length = max(max_length, ids.size(1))
+    all_input_ids_list.append(inputs["input_ids"])
+    all_attention_mask_list.append(inputs["attention_mask"])
 
-# Step 2: Pad each tensor to max length
-padded_input_ids_list = []
-padded_attention_mask_list = []
-for ids, mask in zip(input_ids_list, attention_mask_list):
-    padding_length = max_length - ids.size(1)
-    
-    # Pad input_ids
-    padded_ids = torch.cat([
-        ids, 
-        torch.zeros((ids.size(0), padding_length), dtype=ids.dtype)
-    ], dim=1)
-    padded_input_ids_list.append(padded_ids)
-    
-    # Pad attention_mask
-    padded_mask = torch.cat([
-        mask,
-        torch.zeros((mask.size(0), padding_length), dtype=mask.dtype)
-    ], dim=1)
-    padded_attention_mask_list.append(padded_mask)
+max_len = max(tensor.shape[1] for tensor in all_input_ids_list)
+padded_input_tensors = [F.pad(input=tensor, pad=(0, max_len - tensor.shape[1])) for tensor in all_input_ids_list]
+padded_attention_tensors = [F.pad(input=tensor, pad=(0, max_len - tensor.shape[1])) for tensor in all_attention_mask_list]
 
-# Step 3: Stack the tensors
-input_ids = torch.stack(padded_input_ids_list)
-attention_mask = torch.stack(padded_attention_mask_list)
+all_input_ids = torch.stack(padded_input_tensors)
+all_attention_mask = torch.stack(padded_attention_tensors)
+all_labels = torch.tensor(all_answers, dtype=torch.long)
 
-# DataLoader 생성
-dataset = TensorDataset(input_ids, attention_mask, torch.tensor(answers))
-dataloader = DataLoader(dataset, batch_size=2, shuffle=True)
+# Split the data into training and validation sets
+train_input_ids, val_input_ids, train_attention_mask, val_attention_mask, train_labels, val_labels = train_test_split(all_input_ids, all_attention_mask, all_labels, test_size=0.1, random_state=42)
 
-# 평가 함수 정의
-def evaluate_MAP(model, dataloader):
-    model.eval()
-    all_scores = []
-    all_labels = []
-    with torch.no_grad():
-        for batch in tqdm(dataloader):
-            input_ids, attention_mask, labels = batch
-            outputs = model(input_ids, attention_mask=attention_mask)[0]
-            scores = torch.softmax(outputs, dim=1)
-            all_scores.extend(scores.tolist())
-            all_labels.extend(labels.tolist())
-    
-    # MAP 계산
-    total_precision = 0
-    num_questions = len(all_labels)
-    
-    for i in range(num_questions):
-        scores = np.array(all_scores[i])
-        correct_label = all_labels[i]
+train_dataloader = DataLoader(TensorDataset(train_input_ids, train_attention_mask, train_labels), batch_size=2, shuffle=True)
+val_dataloader = DataLoader(TensorDataset(val_input_ids, val_attention_mask, val_labels), batch_size=2, shuffle=False)
+
+
+best_map3 = 0.0  # Initialize best MAP@3
+
+# Fine-tuning with validation
+def fine_tune_and_validate(model, train_dataloader, val_dataloader, epochs=5):
+    global best_map3
+    for epoch in range(epochs):
+        print(f"Starting epoch {epoch+1}")
         
-        # 예측 점수에 따라 정렬
-        sorted_indices = np.argsort(scores)[::-1]
+        # Training
+        model.train()
+        for batch in tqdm(train_dataloader):
+            input_ids, attention_mask, labels = [t.to(device) for t in batch]
+            optimizer.zero_grad()
+            outputs = model(input_ids, attention_mask=attention_mask, labels=labels)
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
         
-        # Precision@1 계산
-        if sorted_indices[0] == correct_label:
-            total_precision += 1
+        # Validation
+        model.eval()
+        all_scores = []
+        all_labels = []
+        with torch.no_grad():
+            for batch in tqdm(val_dataloader):
+                input_ids, attention_mask, labels = [t.to(device) for t in batch]
+                outputs = model(input_ids, attention_mask=attention_mask)[0]
+                scores = torch.softmax(outputs, dim=1)
+                all_scores.append(scores.cpu().numpy())
+                all_labels.append(labels.cpu().numpy())
+        
+        all_scores = np.concatenate(all_scores, axis=0)
+        all_labels = np.concatenate(all_labels, axis=0)
+        
+        map3 = label_ranking_average_precision_score(all_labels, all_scores)
+        print(f"Validation MAP@3 for epoch {epoch+1}: {map3}")
+        
+        if map3 > best_map3:
+            print("New best model. Saving...")
+            best_map3 = map3
             
-    map_score = total_precision / num_questions
-    return map_score
+    return model
 
-# 예측 결과를 저장할 DataFrame 생성
-submission_data = []
-
-# 평가 함수 정의
-def evaluate_and_predict(model, dataloader):
-    model.eval()
-    all_scores = []
-    all_labels = []
-    with torch.no_grad():
-        for idx, batch in tqdm(enumerate(dataloader)):
-            input_ids, attention_mask, labels = batch
-            outputs = model(input_ids, attention_mask=attention_mask)[0]
-            scores = torch.softmax(outputs, dim=1)
-            all_scores.extend(scores.tolist())
-            all_labels.extend(labels.tolist())
-            
-            # 예측 결과를 저장합니다
-            pred_scores = scores[0]
-            sorted_indices = pred_scores.argsort(descending=True)
-            sorted_choices = " ".join([chr(ord('A') + i) for i in sorted_indices.tolist()])
-            submission_data.append([idx, sorted_choices])
-
-# submission.csv 파일로 저장
-submission_df = pd.DataFrame(submission_data, columns=['id', 'prediction'])
-submission_df.to_csv('submission.csv', index=False)
-
-# # 기본 능력 테스트
-# map_score = evaluate_MAP(model, dataloader)
-# print(f"Mean Average Precision: {map_score}")
+# Fine-tuning the model
+model = fine_tune_and_validate(model, train_dataloader, val_dataloader, epochs=5)
