@@ -10,6 +10,8 @@ import torch.nn.functional as F
 
 # Data loading
 train_data = pd.read_csv('data/train.csv')
+# all_data = pd.read_csv('data/train.csv')
+
 extra_6000_data = pd.read_csv('data/6000_train_examples.csv')
 extra_data = pd.read_csv('data/extra_train_set.csv')
 
@@ -73,8 +75,12 @@ val_dataloader = DataLoader(TensorDataset(val_input_ids, val_attention_mask, val
 
 best_map3 = 0.0  # Initialize best MAP@3
 
+from sklearn.preprocessing import LabelBinarizer
+
+
+
 # Fine-tuning with validation
-def fine_tune_and_validate(model, train_dataloader, val_dataloader, epochs=5):
+def fine_tune_and_validate(model, train_dataloader, val_dataloader, epochs=10):
     global best_map3
     for epoch in range(epochs):
         print(f"Starting epoch {epoch+1}")
@@ -101,17 +107,26 @@ def fine_tune_and_validate(model, train_dataloader, val_dataloader, epochs=5):
                 all_scores.append(scores.cpu().numpy())
                 all_labels.append(labels.cpu().numpy())
         
+
+        
         all_scores = np.concatenate(all_scores, axis=0)
         all_labels = np.concatenate(all_labels, axis=0)
         
-        map3 = label_ranking_average_precision_score(all_labels, all_scores)
+        # One-hot encode the labels
+        lb = LabelBinarizer()
+        lb.fit(all_labels)
+        all_labels_onehot = lb.transform(all_labels)
+        # print("One-hot encoded labels shape:", all_labels_onehot.shape)  # Should be (20, 5) in your case
+
+        map3 = label_ranking_average_precision_score(all_labels_onehot, all_scores)
         print(f"Validation MAP@3 for epoch {epoch+1}: {map3}")
         
         if map3 > best_map3:
             print("New best model. Saving...")
             best_map3 = map3
-            
+            model.save_pretrained("extra_deberta_v3_large")
+            tokenizer.save_pretrained("extra_deberta_v3_large")
     return model
 
 # Fine-tuning the model
-model = fine_tune_and_validate(model, train_dataloader, val_dataloader, epochs=5)
+model = fine_tune_and_validate(model, train_dataloader, val_dataloader, epochs=10)
